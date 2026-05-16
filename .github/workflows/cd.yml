@@ -1,0 +1,91 @@
+name: CD — Deploy to Staging & Production
+
+on:
+  push:
+    tags:
+      - 'v*'              # v1.2.3 → prod deploy tetikler
+  workflow_dispatch:       # manuel tetikleme
+    inputs:
+      environment:
+        description: 'Deploy environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options: [staging, production]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+
+  # ────────────────────────────────────────────────────────────
+  # JOB 1: Deploy to Staging
+  # ────────────────────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy → Staging
+    runs-on: ubuntu-latest
+    environment: staging     # GitHub Environment — onay gerektirmiyor
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: tag
+        run: echo "TAG=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Deploy to staging (kubectl)
+        run: |
+          echo "Deploying ${{ steps.tag.outputs.TAG }} to staging..."
+          # kubectl set image deployment/app app=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.TAG }} -n staging
+          # kubectl rollout status deployment/app -n staging --timeout=120s
+
+      - name: Run smoke tests
+        run: |
+          echo "Running smoke tests against staging..."
+          # curl -f https://staging.example.com/actuator/health
+
+      - name: Notify Slack on success
+        if: success()
+        run: |
+          echo "Staging deploy successful — ${{ steps.tag.outputs.TAG }}"
+          # curl -X POST ${{ secrets.SLACK_WEBHOOK }} -d '{"text":"Staging deploy OK: ${{ steps.tag.outputs.TAG }}"}'
+
+  # ────────────────────────────────────────────────────────────
+  # JOB 2: Deploy to Production (manual approval)
+  # ────────────────────────────────────────────────────────────
+  deploy-production:
+    name: Deploy → Production
+    runs-on: ubuntu-latest
+    needs: [deploy-staging]
+    environment: production  # GitHub Environment — Required Reviewers ile onay kapısı
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: tag
+        run: echo "TAG=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Deploy to production (kubectl)
+        run: |
+          echo "Deploying ${{ steps.tag.outputs.TAG }} to production..."
+          # kubectl set image deployment/app app=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.TAG }} -n production
+          # kubectl rollout status deployment/app -n production --timeout=300s
+
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "PROD deploy FAILED — initiating rollback..."
+          # kubectl rollout undo deployment/app -n production

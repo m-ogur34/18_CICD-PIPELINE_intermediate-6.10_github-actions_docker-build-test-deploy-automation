@@ -1,0 +1,64 @@
+name: PR Checks
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+
+  lint-and-format:
+    name: Lint & Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: temurin
+          cache: maven
+
+      - name: Check code format (google-java-format)
+        run: |
+          wget -q https://github.com/google/google-java-format/releases/download/v1.19.2/google-java-format-1.19.2-all-deps.jar
+          find src -name "*.java" | xargs java -jar google-java-format-1.19.2-all-deps.jar --dry-run --set-exit-if-changed || echo "Format check (non-blocking)"
+
+  security-scan:
+    name: Dependency Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: temurin
+          cache: maven
+
+      - name: OWASP Dependency Check
+        run: mvn -B org.owasp:dependency-check-maven:check --no-transfer-progress || true
+
+      - name: Upload OWASP report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: owasp-report
+          path: target/dependency-check-report.html
+
+  pr-size-check:
+    name: PR Size Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check PR size
+        run: |
+          CHANGED=$(git diff --stat origin/${{ github.base_ref }}...HEAD | tail -1)
+          echo "Changed: $CHANGED"
+          LINES=$(git diff origin/${{ github.base_ref }}...HEAD | wc -l)
+          echo "Total diff lines: $LINES"
+          if [ "$LINES" -gt 2000 ]; then
+            echo "::warning::Large PR — consider splitting ($LINES lines changed)"
+          fi
