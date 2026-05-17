@@ -1,63 +1,112 @@
+# ────────────────────────────────────────────────────────────────────────────
+# Kubernetes Deployment — Declarative Configuration
+#
+# Declarative vs Imperative:
+#   kubectl run (imperative) → ne yap söylersin
+#   deployment.yml (declarative) → istenen durumu tanımlarsın, K8s sağlar
+#
+# Deployment → ReplicaSet → Pod hiyerarşisi:
+#   Deployment: güncelleme stratejisi, replica sayısı yönetir
+#   ReplicaSet: belirtilen sayıda Pod'u canlı tutar (crash → yeni Pod)
+#   Pod: 1+ container grubu, ortak IP ve volume paylaşır
+# ────────────────────────────────────────────────────────────────────────────
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: cicd-app
-  namespace: production
+  namespace: production  # mantıksal izolasyon (RBAC, network policy)
   labels:
     app: cicd-app
     version: "1.0.0"
 spec:
-  replicas: 3
+  replicas: 3  # her zaman 3 Pod çalışsın (birisi crash ederse yeni başlatılır)
+
+  # Rolling Update Stratejisi — sıfır downtime güncelleme
+  # maxSurge: 1      → güncelleme sırasında en fazla 1 ekstra Pod (3+1=4 Pod geçici)
+  # maxUnavailable: 0 → hiçbir Pod kapanmaz (yeni Pod hazır olunca eski kapanır)
+  # Alternatif: Recreate → tüm Pod'lar kapatılır, yeniler başlar (downtime var, ama daha hızlı)
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxSurge: 1           # en fazla 1 extra pod
-      maxUnavailable: 0     # sıfır downtime
+      maxSurge: 1
+      maxUnavailable: 0
+
   selector:
     matchLabels:
-      app: cicd-app
+      app: cicd-app  # hangi Pod'ları bu Deployment yönetsin
   template:
     metadata:
       labels:
-        app: cicd-app
+        app: cicd-app  # Service bu label'ı kullanarak Pod'ları bulur
     spec:
       containers:
         - name: app
           image: ghcr.io/m-ogur34/cicd-pipeline:latest
           ports:
             - containerPort: 8080
+
           env:
             - name: SPRING_PROFILES_ACTIVE
               value: "kubernetes"
+            # Secret referansı — değer düz YAML'a yazılmaz, Secret objesinden okunur
+            # kubectl create secret generic app-secrets --from-literal=db-password=xxx
             - name: DB_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: app-secrets
                   key: db-password
+
+          # Resource Management — mülakat sorusu: requests vs limits farkı?
+          # requests: scheduler'ın Pod'u node'a yerleştirirken kullandığı değer
+          #           Pod garantili bu kadar kaynak alır
+          # limits:   Pod bu sınırı aşamaz — CPU throttle edilir, memory OOMKill
+          # CPU: 250m = 0.25 core (millicores). 1000m = 1 tam CPU core.
           resources:
             requests:
               memory: "256Mi"
-              cpu: "250m"
+              cpu: "250m"   # scheduler: "bu node'da 250m CPU boş mu?"
             limits:
-              memory: "512Mi"
-              cpu: "500m"
+              memory: "512Mi"  # aşarsa OOMKilled → crash loop
+              cpu: "500m"      # aşarsa throttle (crash yok, yavaşlar)
+
+          # ── Health Probes ──────────────────────────────────────────────────
+          # readinessProbe: "Pod trafik almaya hazır mı?"
+          #   FAIL → Service bu Pod'u EndpointSlice'tan çıkarır, trafik gelmez
+          #   Warmup (DB bağlantısı, cache yükleme) süresince FAIL olmalı
           readinessProbe:
             httpGet:
-              path: /actuator/health/readiness
+              path: /actuator/health/readiness  # Spring Boot Actuator endpoint
               port: 8080
-            initialDelaySeconds: 30
-            periodSeconds: 10
-            failureThreshold: 3
+            initialDelaySeconds: 30  # Pod başladıktan 30sn sonra ilk kontrol
+            periodSeconds: 10        # her 10sn kontrol
+            failureThreshold: 3      # 3 başarısız → Pod NotReady
+
+          # livenessProbe: "Pod yaşıyor mu, restart gerekiyor mu?"
+          #   FAIL → kubelet Pod'u restart eder (deadlock, memory leak tespiti)
+          #   readinessProbe'dan SONRA devreye girmeli (initialDelay daha yüksek)
           livenessProbe:
             httpGet:
               path: /actuator/health/liveness
               port: 8080
-            initialDelaySeconds: 60
+            initialDelaySeconds: 60  # readiness'ten sonra (60 > 30)
             periodSeconds: 30
             failureThreshold: 3
-      terminationGracePeriodSeconds: 60  # graceful shutdown
+
+      # Graceful Shutdown — Pod silinince 60sn içinde bitirmesi beklenir
+      # Spring Boot: server.shutdown=graceful + spring.lifecycle.timeout-per-shutdown-phase=50s
+      terminationGracePeriodSeconds: 60
 
 ---
+# ────────────────────────────────────────────────────────────────────────────
+# Service — Pod'lara sabit erişim noktası
+#
+# Pod'ların IP'si her restart'ta değişir → Service stabil IP/DNS sağlar.
+# Service türleri:
+#   ClusterIP (default): cluster içi erişim, dışarıdan ulaşılamaz
+#   NodePort:  her node'un IP:port ile dış erişim (dev/test)
+#   LoadBalancer: cloud provider LB (prod)
+#   Ingress: HTTP/HTTPS routing (path/host bazlı)
+# ────────────────────────────────────────────────────────────────────────────
 apiVersion: v1
 kind: Service
 metadata:
@@ -65,13 +114,23 @@ metadata:
   namespace: production
 spec:
   selector:
-    app: cicd-app
+    app: cicd-app  # bu label'a sahip Pod'ları hedefle (Deployment ile eşleşmeli)
   ports:
-    - port: 80
-      targetPort: 8080
-  type: ClusterIP
+    - port: 80       # Service'e gelen port
+      targetPort: 8080  # Pod'daki container port'u
+  type: ClusterIP  # cluster içi, Ingress ile dışarıya açılır
 
 ---
+# ────────────────────────────────────────────────────────────────────────────
+# HPA (Horizontal Pod Autoscaler) — Otomatik ölçekleme
+#
+# Metrics Server'dan CPU/memory alır (15s interval).
+# Target: %70 CPU — Pod ortalama %70 CPU kullanıyorsa yeni Pod ekle.
+# Scale-up:   hızlı (anında)
+# Scale-down: yavaş (cooldown 5dk — spike'ta gereksiz scale-down önle)
+#
+# Önemli: resources.requests MUTLAKA tanımlanmalı (HPA % hesaplar)
+# ────────────────────────────────────────────────────────────────────────────
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
@@ -82,18 +141,18 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: cicd-app
-  minReplicas: 2
-  maxReplicas: 10
+  minReplicas: 2   # hiçbir zaman 2'nin altına inme (availability)
+  maxReplicas: 10  # en fazla 10 Pod (maliyet kontrolü)
   metrics:
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: 70
+          averageUtilization: 70  # Pod'ların ortalama CPU %70 → scale-up
     - type: Resource
       resource:
         name: memory
         target:
           type: Utilization
-          averageUtilization: 80
+          averageUtilization: 80  # memory %80 → scale-up
