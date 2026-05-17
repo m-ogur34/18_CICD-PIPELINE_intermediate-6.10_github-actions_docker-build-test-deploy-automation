@@ -205,23 +205,23 @@ management:
 
 ## Mülakat Soruları
 
-**Q: CI/CD farkı?**
-A: CI — her commit sonrası build + test + analiz (sürekli entegrasyon). CD — Continuous Delivery: staging'e otomatik, prod'a onaylı. Continuous Deployment: prod'a da otomatik.
+**Q: CI/CD nedir? Continuous Delivery ile Continuous Deployment farkı?**
+A: CI (Continuous Integration): Her commit → otomatik build + unit test + static analysis (SonarQube). Amacı: Integration bug'larını erken yakala, "works on my machine" problemini önle. CD (Continuous Delivery): CI başarılı → staging'e otomatik deploy. Production'a ise onaylı (manual trigger) — "her zaman deploy edilebilir" garanti. Continuous Deployment: Her şey otomatik, production'a da. Netflix, Amazon bunu kullanır (günde yüzlerce deploy). Pratik: Çoğu şirket Continuous Delivery (prod için approval gate). Kubernetes + ArgoCD ile GitOps: Git'e merge = deploy trigger (declarative, rollback kolay).
 
-**Q: Docker multi-stage build neden kullanılır?**
-A: Final image'a build araçları (Maven, JDK) dahil olmaz → küçük, güvenli image. Builder stage'de JDK, runtime stage'de sadece JRE.
+**Q: Docker multi-stage build neden kullanılır? Image boyutunu nasıl küçültür?**
+A: Multi-stage build: `FROM maven AS builder` → `FROM eclipse-temurin:21-jre-alpine`. Builder stage'de JDK + Maven + source code. Runtime stage'de sadece JRE + `.jar` — build araçları dahil değil. Fark: Builder image ~400MB, runtime image ~100-150MB. Güvenlik: JDK'da derleme araçları var, saldırı yüzeyi büyük. JRE yeterli — JDK yok. Spring Boot layered jar: Bağımlılıklar (nadiren değişir) ayrı layer, uygulama kodu ayrı layer → Docker cache etkili kullanılır (bağımlılık layer cache'den gelir, sadece kod layer rebuild). Alpine base image: 5MB temel, minimal attack surface.
 
-**Q: `readinessProbe` vs `livenessProbe` farkı?**
-A: Readiness — pod trafik almaya hazır mı (warmup süresinde hayır). Liveness — uygulama çalışıyor mu, restart gerekiyor mu. İkisi birlikte: hazır olmadan trafik gelmiyor, donuksa restart ediliyor.
+**Q: `readinessProbe` vs `livenessProbe` vs `startupProbe` farkları nelerdir?**
+A: `readinessProbe`: Pod trafik almaya hazır mı? Spring Boot'ta `/actuator/health/readiness`. Uygulama başlarken (DB bağlantısı, cache warmup) trafik gelmemeli — readiness FAIL → Service EndpointSlice'tan çıkarılır. `livenessProbe`: Uygulama çalışıyor mu, restart gerekiyor mu? Deadlock, memory leak → liveness FAIL → `kubectl restart`. `/actuator/health/liveness`. `startupProbe`: Yavaş başlayan uygulamalar için — `livenessProbe` devreye girmeden önce başlama süresi tanı. Başarılı olunca `livenessProbe` devreye girer. Kural: `startupProbe` ile uzun başlangıcı tolere et, `livenessProbe` ile runtime'ı kontrol et, `readinessProbe` ile trafiği yönet.
 
-**Q: HPA nasıl çalışır?**
-A: Metrics Server'dan CPU/memory alır. Hedef utilization aşılınca pod sayısını artırır. Azalınca yavaşça düşürür (cooldown).
+**Q: HPA (Horizontal Pod Autoscaler) nasıl çalışır? VPA'dan farkı?**
+A: HPA: Metrics Server'dan CPU/memory metrics alır (15s interval). `targetAverageUtilization: 70%` → ortalama CPU %70 aşılırsa yeni pod ekle. Scale-down: 5 dakika cooldown (ani spike'ta gereksiz scale-down önlenir). Custom metrics: Kafka consumer lag, HTTP RPS ile de scale edilebilir (KEDA). VPA (Vertical Pod Autoscaler): Pod sayısı değil, resource limit artırır — container'a daha fazla CPU/RAM. HPA ile birlikte kullanım çatışabilir. Öneri: HPA (horizontal) tercih et — stateless uygulama için doğal. Cluster Autoscaler: Node sayısını yönetir (pod eklenince node yetmezse yeni node).
 
-**Q: `maxUnavailable: 0` ne anlama gelir?**
-A: Rolling update sırasında hiçbir pod kapatılmaz (maxSurge ile eklenen pod hazır olunca eski kapanır). Sıfır downtime için.
+**Q: Kubernetes rolling update stratejisi nedir? Blue-Green'den farkı?**
+A: Rolling update: `maxUnavailable: 0, maxSurge: 1` — önce yeni pod başlat, readinessProbe geçince eski pod kapat. Sıfır downtime, kademeli. Dezavantaj: Bir süre eski+yeni versiyon birlikte çalışır (backward compatibility gerekir). Blue-Green deployment: İki ortam (blue=eski, green=yeni). Traffic tümüyle switch edilir. Anında rollback: traffic blue'ya döner. Kaynak: İki kat pod. Canary deployment: Trafiğin %5'ini yeni versiyona yönlendir, metrikler iyi → %100. Ingress veya service mesh (Istio) ile. Kubernetes'te: `kubectl rollout undo deployment/app` ile önceki version'a geri dön.
 
-**Q: GitHub Secrets nasıl kullanılır?**
-A: Repository Settings → Secrets. `${{ secrets.NAME }}` ile erişilir. Logda maskelenir, `echo` ile görüntülenemez.
+**Q: GitHub Actions'da matris strateji ve cache nasıl kullanılır?**
+A: Matrix strategy: Aynı iş farklı parametrelerle paralel çalışır. `strategy.matrix: {java: [17, 21], os: [ubuntu, windows]}` → 4 job paralel. Multi-version, multi-platform test için. Cache: `actions/cache@v4` ile Maven `.m2` dizinini cache'le — bağımlılıklar her run'da indirilmez. `key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}` — `pom.xml` değişince cache bozulur, yeniden indirilir. GitHub Secrets: Repository → Settings → Secrets. `${{ secrets.DOCKER_PASSWORD }}` ile erişilir, log'da `***` olarak maskelenir, `echo` ile görüntülenemez, fork'larda erişilemez.
 
 ---
 
